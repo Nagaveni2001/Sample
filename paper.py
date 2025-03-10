@@ -1,69 +1,89 @@
 import requests
 import pandas as pd
-import csv
+from typing import List
 
-# Define a list of keywords related to pharmaceutical and biotech companies
-pharma_keyword = [
-    "pharmaceutical", "biotech", "biotechnology", "biopharma", "biopharmaceutical",
-    "drug", "medicines", "healthcare", "therapeutics", "vaccines"
-]
 
-# Function to fetch research papers from Semantic Scholar API
-def fetch_paper(query, max_results=10):
-    url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={query}&limit={max_results}"
-    response = requests.get(url)
+PUBMED_SEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+PUBMED_FETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+
+
+def fetch_pubmed_ids(query: str, max_results: int = 20) -> List[str]:
+    params = {
+        'db': 'pubmed',
+        'term': query,
+        'retmax': max_results,
+        'usehistory': 'y',
+        'retmode': 'xml'
+    }
+    response = requests.get(PUBMED_SEARCH_URL, params=params)
+    if response.status_code != 200:
+        raise Exception(f"Error fetching PubMed IDs: {response.text}")
     
-    if response.status_pin != 200:
-        print("Error fetching data from Semantic Scholar API.")
-        return []
-    
-    papers = response.json()['data']
-    return papers
+    pubmed_ids = []
+    from xml.etree import ElementTree
+    root = ElementTree.fromstring(response.content)
+    for id_elem in root.findall(".//Id"):
+        pubmed_ids.append(id_elem.text)
+    return pubmed_ids
 
-# Function to check if any author has affiliation with a pharmaceutical or biotech company
-def is_pharma_affiliated(authors):
-    for author in authors:
-        if 'affiliations' in author:
-            for affiliation in author['affiliations']:
-                if any(keyword.lower() in affiliation.lower() for keyword in pharma_keyword):
-                    return True
-    return False
 
-# Function to process papers and save to CSV
-def process_and_save_papers(query, max_results=10, output_file='research_papers.csv'):
-    papers = fetch_paper(query, max_results)
+def fetch_paper_details(pubmed_ids: List[str]) -> List[dict]:
+    details = []
+    ids_str = ",".join(pubmed_ids)
+    params = {
+        'db': 'pubmed',
+        'id': ids_str,
+        'retmode': 'xml',
+        'tool': 'get-papers-list',
+        'email': 'your-email@example.com'
+    }
+    response = requests.get(PUBMED_FETCH_URL, params=params)
+    if response.status_code != 200:
+        raise Exception(f"Error fetching paper details: {response.text}")
     
+    from xml.etree import ElementTree
+    root = ElementTree.fromstring(response.content)
+    for docsum in root.findall(".//DocSum"):
+        paper = {}
+        for item in docsum.findall(".//Item"):
+            name = item.get('Name')
+            value = item.text
+            if name == 'Title':
+                paper['Title'] = value
+            elif name == 'Source':
+                paper['Publication Date'] = value
+            elif name == 'Author':
+                paper['Authors'] = value
+            elif name == 'Email':
+                paper['Corresponding Author Email'] = value
+        details.append(paper)
+    
+    return details
+
+
+def filter_papers_with_company_affiliation(papers: List[dict], companies: List[str]) -> List[dict]:
     filtered_papers = []
-    
-    # Process papers
     for paper in papers:
-        title = paper['title']
-        authors = paper['authors']
-        affiliations = [author.get('affiliations', []) for author in authors]
-        
-        # Check if any author is affiliated with pharmaceutical or biotech companies
-        if is_pharma_affiliated(authors):
-            paper_info = {
-                'title': title,
-                'authors': ', '.join([author['name'] for author in authors]),
-                'affiliations': ', '.join([', '.join(aff) for aff in affiliations if aff]),
-                'url': paper.get('url', 'N/A'),
-                'year': paper.get('year', 'N/A'),
-                'abstract': paper.get('abstract', 'N/A')
-            }
-            filtered_papers.append(paper_info)
-    
-    # Save to CSV
-    df = pd.DataFrame(filtered_papers)
-    df.to_csv(output_file, index=False, quoting=csv.QUOTE_MINIMAL)
-    print(f"Saved {len(filtered_papers)} papers to {output_file}")
+        authors = paper.get('Authors', '')
+        for company in companies:
+            if company.lower() in authors.lower():
+                paper['Company Affiliation(s)'] = company
+                filtered_papers.append(paper)
+                break
+    return filtered_papers
 
-# Main function to interact with the user
-def main():
-    query = input("Enter the research query: ")
-    max_results = int(input("Enter the number of results to fetch (default 10): ") or 10)
-    
-    process_and_save_papers(query, max_results)
 
-if __name__ == "__main__":
-    main()
+def save_papers_to_csv(papers: List[dict], filename: str):
+    df = pd.DataFrame(papers)
+    df.to_csv(filename, index=False)
+
+
+def fetch_and_process_papers(query: str, companies: List[str], max_results: int = 20, output_file: str = None):
+    pubmed_ids = fetch_pubmed_ids(query, max_results)
+    papers = fetch_paper_details(pubmed_ids)
+    filtered_papers = filter_papers_with_company_affiliation(papers, companies)
+    
+    if output_file:
+        save_papers_to_csv(filtered_papers, output_file)
+    else:
+        print(pd.DataFrame(filtered_papers))
